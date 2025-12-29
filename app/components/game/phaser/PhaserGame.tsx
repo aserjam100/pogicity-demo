@@ -23,6 +23,8 @@ export interface PhaserGameHandle {
   getCarCount: () => number;
   clearCharacters: () => void;
   clearCars: () => void;
+  shakeScreen: (axis?: "x" | "y", intensity?: number, duration?: number) => void;
+  zoomAtPoint: (zoom: number, screenX: number, screenY: number) => void;
 }
 
 interface PhaserGameProps {
@@ -36,6 +38,7 @@ interface PhaserGameProps {
   onTilesDrag?: (tiles: Array<{ x: number; y: number }>) => void;
   onEraserDrag?: (tiles: Array<{ x: number; y: number }>) => void;
   onRoadDrag?: (segments: Array<{ x: number; y: number }>) => void;
+  onZoomChange?: (zoom: number) => void;
   showPaths?: boolean;
   showStats?: boolean;
 }
@@ -53,6 +56,7 @@ const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
       onTilesDrag,
       onEraserDrag,
       onRoadDrag,
+      onZoomChange,
       showPaths = false,
       showStats = true,
     },
@@ -61,6 +65,8 @@ const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
     const containerRef = useRef<HTMLDivElement>(null);
     const gameRef = useRef<Phaser.Game | null>(null);
     const sceneRef = useRef<MainScene | null>(null);
+    // Track zoom value set via zoomAtPoint to skip re-centering in useEffect
+    const zoomFromAtPoint = useRef<number | null>(null);
 
     // Expose methods to parent via ref
     useImperativeHandle(
@@ -117,6 +123,17 @@ const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
             sceneRef.current.clearCars();
           }
         },
+        shakeScreen: (axis?: "x" | "y", intensity?: number, duration?: number) => {
+          if (sceneRef.current) {
+            sceneRef.current.shakeScreen(axis, intensity, duration);
+          }
+        },
+        zoomAtPoint: (zoom: number, screenX: number, screenY: number) => {
+          if (sceneRef.current) {
+            zoomFromAtPoint.current = zoom; // Track this zoom value to skip re-centering
+            sceneRef.current.zoomAtPoint(zoom, screenX, screenY);
+          }
+        },
       }),
       []
     );
@@ -143,6 +160,11 @@ const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
           onRoadDrag: (segments) => onRoadDrag?.(segments),
         };
         scene.setEventCallbacks(events);
+
+        // Listen for zoom changes from Phaser (wheel zoom handled in scene)
+        scene.events.on("zoomChanged", (newZoom: number) => {
+          onZoomChange?.(newZoom);
+        });
       });
 
       return () => {
@@ -180,8 +202,13 @@ const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
       }
     }, [buildingOrientation]);
 
-    // Update zoom
+    // Update zoom (skip if zoomAtPoint already handled it)
     useEffect(() => {
+      if (zoomFromAtPoint.current === zoom) {
+        zoomFromAtPoint.current = null;
+        return;
+      }
+      zoomFromAtPoint.current = null;
       if (sceneRef.current) {
         sceneRef.current.setZoom(zoom);
       }

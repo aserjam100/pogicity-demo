@@ -112,6 +112,8 @@ export class MainScene extends Phaser.Scene {
 
   // Zoom level
   private zoomLevel: number = 1;
+  // Flag to skip React's setZoom after internal wheel zoom
+  private zoomHandledInternally: boolean = false;
 
   // Scene ready flag
   private isReady: boolean = false;
@@ -158,6 +160,21 @@ export class MainScene extends Phaser.Scene {
   private panStartY: number = 0;
   private cameraStartX: number = 0;
   private cameraStartY: number = 0;
+
+  // Screen shake state (for building placement impact)
+  // IMPORTANT: keep "base" camera scroll separate from transient shake offset.
+  // Otherwise panning / keyboard input can accidentally bake the shake into the base scroll.
+  private baseScrollX: number = 0;
+  private baseScrollY: number = 0;
+  private wasDriving: boolean = false;
+
+  private shakeAxis: "x" | "y" = "y";
+  private shakeOffset: number = 0;
+  private shakeDuration: number = 0;
+  private shakeIntensity: number = 0;
+  private shakeElapsed: number = 0;
+  // Number of oscillations during the shake (must be an integer so it ends at exactly 0)
+  private shakeCycles: number = 3;
 
   constructor() {
     super({ key: "MainScene" });
@@ -239,6 +256,10 @@ export class MainScene extends Phaser.Scene {
     this.input.on("pointerdown", this.handlePointerDown, this);
     this.input.on("pointerup", this.handlePointerUp, this);
 
+    // Mouse wheel zoom - handled directly in Phaser for correct coordinates
+    // Based on: https://phaser.io/examples/v3.85.0/tilemap/view/mouse-wheel-zoom
+    this.input.on("wheel", this.handleWheel, this);
+
     // Initial render
     this.renderGrid();
 
@@ -298,7 +319,7 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  update(): void {
+  update(_time: number, delta: number): void {
     if (!this.isReady) return;
 
     // Update game entities
@@ -307,7 +328,7 @@ export class MainScene extends Phaser.Scene {
     this.updatePlayerCar();
 
     // Handle camera movement (when not driving)
-    this.updateCamera();
+    this.updateCamera(delta);
 
     // Render updated entities
     this.renderCars();
@@ -355,50 +376,97 @@ export class MainScene extends Phaser.Scene {
     this.statsText.setColor(fpsColor);
   }
 
-  private updateCamera(): void {
+  private updateCamera(delta: number): void {
     if (!this.cursors) return;
 
     const camera = this.cameras.main;
 
-    // If in driving mode, follow the player car
+    // Update screen shake (pure offset; MUST end at exactly 0)
+    if (this.shakeElapsed < this.shakeDuration) {
+      this.shakeElapsed += delta;
+      const t = Math.min(this.shakeElapsed / this.shakeDuration, 1); // 0 -> 1
+      // Snappy + SC4-ish: slightly stronger first hit, then damps faster.
+      // (1 - t)^2 is fast ease-out; the extra *(1 + boost*(1 - t)) biases early frames a bit higher.
+      const baseEnvelope = (1 - t) * (1 - t);
+      const boost = 0.1; // "slightly more" on the first hit
+      const envelope = baseEnvelope * (1 + boost * (1 - t));
+      // Oscillate and guarantee we end at exactly 0 at t=1 (sin(2πn)=0)
+      // Start with a small "down" impact (positive scrollY), then a smaller up rebound.
+      // Phase ease: advance faster early so the first downward hit is snappier
+      const phaseT = Math.sqrt(t);
+      const wave =
+        Math.sin(phaseT * this.shakeCycles * Math.PI * 2) *
+        this.shakeIntensity *
+        envelope;
+      this.shakeOffset = wave < 0 ? wave * 0.45 : wave;
+    } else {
+      this.shakeOffset = 0;
+    }
+
+    // If in driving mode, follow the player car (sets base scroll absolutely every frame)
     if (this.isPlayerDriving && this.playerCar) {
+      this.wasDriving = true;
       const screenPos = this.gridToScreen(this.playerCar.x, this.playerCar.y);
       const groundY = screenPos.y + TILE_HEIGHT / 2;
       const viewportWidth = camera.width / camera.zoom;
       const viewportHeight = camera.height / camera.zoom;
+      this.baseScrollX = screenPos.x - viewportWidth / 2;
+      this.baseScrollY = groundY - viewportHeight / 2;
       camera.setScroll(
-        screenPos.x - viewportWidth / 2,
-        groundY - viewportHeight / 2
+        Math.round(this.baseScrollX + (this.shakeAxis === "x" ? this.shakeOffset : 0)),
+        Math.round(this.baseScrollY + (this.shakeAxis === "y" ? this.shakeOffset : 0))
       );
-    } else {
-      // Manual camera movement when not driving
-      // Don't move camera if user is typing in an input field
-      const activeElement = document.activeElement;
-      const isTyping =
-        activeElement &&
-        (activeElement.tagName === "INPUT" ||
-          activeElement.tagName === "TEXTAREA" ||
-          (activeElement as HTMLElement)?.isContentEditable);
+      return;
+    }
 
-      if (isTyping) {
-        return;
-      }
+    // Transition: if we just stopped driving, freeze current camera position as the new base.
+    if (this.wasDriving) {
+      this.wasDriving = false;
+      this.baseScrollX = camera.scrollX;
+      this.baseScrollY = camera.scrollY - this.shakeOffset;
+    }
 
+    // Manual camera movement when not driving
+    // Don't move camera if user is typing in an input field
+    const activeElement = document.activeElement;
+    const isTyping =
+      activeElement &&
+      (activeElement.tagName === "INPUT" ||
+        activeElement.tagName === "TEXTAREA" ||
+        (activeElement as HTMLElement)?.isContentEditable);
+
+    if (!isTyping) {
       const speed = this.CAMERA_SPEED / camera.zoom;
-
       if (this.cursors.left.isDown || this.wasd?.A.isDown) {
-        camera.scrollX -= speed;
+        this.baseScrollX -= speed;
       }
       if (this.cursors.right.isDown || this.wasd?.D.isDown) {
-        camera.scrollX += speed;
+        this.baseScrollX += speed;
       }
       if (this.cursors.up.isDown || this.wasd?.W.isDown) {
-        camera.scrollY -= speed;
+        this.baseScrollY -= speed;
       }
       if (this.cursors.down.isDown || this.wasd?.S.isDown) {
-        camera.scrollY += speed;
+        this.baseScrollY += speed;
       }
     }
+
+    camera.setScroll(
+      Math.round(this.baseScrollX + (this.shakeAxis === "x" ? this.shakeOffset : 0)),
+      Math.round(this.baseScrollY + (this.shakeAxis === "y" ? this.shakeOffset : 0))
+    );
+  }
+
+  // Trigger screen shake effect (like SimCity 4 building placement)
+  shakeScreen(
+    axis: "x" | "y" = "y",
+    intensity: number = 2,
+    duration: number = 150
+  ): void {
+    this.shakeAxis = axis;
+    this.shakeIntensity = intensity;
+    this.shakeDuration = duration;
+    this.shakeElapsed = 0;
   }
 
   // ============================================
@@ -953,7 +1021,13 @@ export class MainScene extends Phaser.Scene {
       const camera = this.cameras.main;
       const dx = (this.panStartX - pointer.x) / camera.zoom;
       const dy = (this.panStartY - pointer.y) / camera.zoom;
-      camera.setScroll(this.cameraStartX + dx, this.cameraStartY + dy);
+      // Update BASE scroll (never include transient shake in the base)
+      this.baseScrollX = this.cameraStartX + dx;
+      this.baseScrollY = this.cameraStartY + dy;
+      camera.setScroll(
+        Math.round(this.baseScrollX + (this.shakeAxis === "x" ? this.shakeOffset : 0)),
+        Math.round(this.baseScrollY + (this.shakeAxis === "y" ? this.shakeOffset : 0))
+      );
       return;
     }
 
@@ -1077,9 +1151,9 @@ export class MainScene extends Phaser.Scene {
         this.isPanning = true;
         this.panStartX = pointer.x;
         this.panStartY = pointer.y;
-        const camera = this.cameras.main;
-        this.cameraStartX = camera.scrollX;
-        this.cameraStartY = camera.scrollY;
+        // Capture BASE scroll (never include transient shake in the base)
+        this.cameraStartX = this.baseScrollX;
+        this.cameraStartY = this.baseScrollY;
         return;
       }
 
@@ -1156,6 +1230,82 @@ export class MainScene extends Phaser.Scene {
       this.dragDirection = null;
       this.updatePreview();
     }
+  }
+
+  // Zoom levels matching React state
+  private static readonly ZOOM_LEVELS = [0.25, 0.5, 1, 2, 4];
+  private wheelAccumulator = 0;
+  private lastWheelDirection = 0;
+  // Anchor point for consistent zoom-at-cursor during rapid scrolling
+  private zoomAnchorWorld: { x: number; y: number } | null = null;
+  private zoomAnchorScreen: { x: number; y: number } | null = null;
+  private lastZoomTime = 0;
+  private static readonly ZOOM_ANCHOR_TIMEOUT = 150; // ms to keep anchor locked
+
+  // Handle mouse wheel zoom - anchor-based to prevent drift
+  // Official Phaser approach: https://phaser.io/examples/v3.85.0/tilemap/view/mouse-wheel-zoom
+  handleWheel(
+    pointer: Phaser.Input.Pointer,
+    _gameObjects: Phaser.GameObjects.GameObject[],
+    _deltaX: number,
+    deltaY: number,
+    _deltaZ: number
+  ): void {
+    if (!this.isReady) return;
+
+    const camera = this.cameras.main;
+    const WHEEL_THRESHOLD = 100;
+
+    // Accumulate wheel delta for discrete zoom levels
+    const direction = deltaY > 0 ? 1 : -1;
+    if (this.lastWheelDirection !== 0 && this.lastWheelDirection !== direction) {
+      this.wheelAccumulator = 0;
+    }
+    this.lastWheelDirection = direction;
+    this.wheelAccumulator += Math.abs(deltaY);
+
+    if (this.wheelAccumulator < WHEEL_THRESHOLD) return;
+    this.wheelAccumulator = 0;
+
+    // Find current zoom index and calculate new zoom
+    const currentZoom = camera.zoom;
+    let currentIndex = MainScene.ZOOM_LEVELS.indexOf(currentZoom);
+    if (currentIndex === -1) {
+      currentIndex = MainScene.ZOOM_LEVELS.reduce((closest, z, i) =>
+        Math.abs(z - currentZoom) < Math.abs(MainScene.ZOOM_LEVELS[closest] - currentZoom) ? i : closest, 0);
+    }
+
+    const newIndex = direction > 0
+      ? Math.max(0, currentIndex - 1)
+      : Math.min(MainScene.ZOOM_LEVELS.length - 1, currentIndex + 1);
+
+    const newZoom = MainScene.ZOOM_LEVELS[newIndex];
+    if (newZoom === currentZoom) return;
+
+    // === OFFICIAL PHASER APPROACH ===
+    // Step 1: Get world point under cursor BEFORE zoom
+    const worldPoint = camera.getWorldPoint(pointer.x, pointer.y);
+
+    // Step 2: Apply new zoom
+    camera.zoom = newZoom;
+
+    // Step 3: Update camera matrix so getWorldPoint returns zoom-adjusted coords
+    camera.preRender();
+
+    // Step 4: Get world point at same screen position AFTER zoom
+    const newWorldPoint = camera.getWorldPoint(pointer.x, pointer.y);
+
+    // Step 5: Scroll camera to keep pointer under same world point
+    camera.scrollX -= newWorldPoint.x - worldPoint.x;
+    camera.scrollY -= newWorldPoint.y - worldPoint.y;
+
+    // Update our state to match
+    this.baseScrollX = camera.scrollX;
+    this.baseScrollY = camera.scrollY;
+    this.zoomLevel = newZoom;
+    this.zoomHandledInternally = true;
+
+    this.events.emit('zoomChanged', newZoom);
   }
 
   setEventCallbacks(events: SceneEvents): void {
@@ -1488,6 +1638,12 @@ export class MainScene extends Phaser.Scene {
   }
 
   setZoom(zoom: number): void {
+    // Skip if zoom was just handled by internal wheel handler
+    if (this.zoomHandledInternally) {
+      this.zoomHandledInternally = false;
+      return;
+    }
+
     if (this.isReady) {
       const camera = this.cameras.main;
 
@@ -1498,9 +1654,45 @@ export class MainScene extends Phaser.Scene {
       // Apply new zoom
       camera.setZoom(zoom);
 
-      // Re-center on the same point
+      // Re-center on the same point, then round for pixel-perfect rendering
       camera.centerOn(centerX, centerY);
+      camera.scrollX = Math.round(camera.scrollX);
+      camera.scrollY = Math.round(camera.scrollY);
+
+      // Update baseScroll so update() loop doesn't reset it
+      this.baseScrollX = camera.scrollX;
+      this.baseScrollY = camera.scrollY;
     }
+    this.zoomLevel = zoom;
+  }
+
+  // Zoom towards a specific screen point (legacy method, now using handleWheel)
+  zoomAtPoint(zoom: number, screenX: number, screenY: number): void {
+    if (!this.isReady) {
+      this.zoomLevel = zoom;
+      return;
+    }
+
+    const camera = this.cameras.main;
+
+    // Get world position under cursor before zoom
+    const worldPoint = camera.getWorldPoint(screenX, screenY);
+
+    // Apply new zoom
+    camera.setZoom(zoom);
+
+    // Update camera matrix
+    camera.preRender();
+
+    // Get new world position and adjust scroll
+    const newWorldPoint = camera.getWorldPoint(screenX, screenY);
+    camera.scrollX = Math.round(camera.scrollX - (newWorldPoint.x - worldPoint.x));
+    camera.scrollY = Math.round(camera.scrollY - (newWorldPoint.y - worldPoint.y));
+
+    // Update baseScroll so update() loop doesn't reset it
+    this.baseScrollX = camera.scrollX;
+    this.baseScrollY = camera.scrollY;
+
     this.zoomLevel = zoom;
   }
 
@@ -1712,6 +1904,78 @@ export class MainScene extends Phaser.Scene {
     }
 
     // ========================================================================
+    // DEPTH LAYER SYSTEM - Layer offsets for correct render ordering
+    // ========================================================================
+    //
+    // Depth formula: sortY * 10000 + sortX + layerOffset
+    //
+    // Layer offsets control render order for items at the same grid position:
+    //   0.00 - Ground tiles (grass, road, asphalt)
+    //   0.04 - Lamp glow effects (behind lamps)
+    //   0.05 - Buildings (regular structures)
+    //   0.06 - Extended decorations (trees with foliage beyond footprint)
+    //   0.10 - Cars
+    //   0.20 - Characters
+    //
+    // FUTURE: When adding fences, traffic lights, etc., use this render order:
+    //   1. Back-left fence   (layer ~0.03, before building)
+    //   2. Back-right fence  (layer ~0.03, before building)
+    //   3. Building          (layer 0.05)
+    //   4. Props/trees       (layer 0.06)
+    //   5. Front-left fence  (layer ~0.07, after building/props)
+    //   6. Front-right fence (layer ~0.07, after building/props)
+    //
+    // FENCES: Determine which edge of the tile the fence is on (N, S, E, W)
+    //   - Back edges (N, W in isometric) render BEFORE the building
+    //   - Front edges (S, E in isometric) render AFTER the building
+    //   - Use the tile's grid position for depth, with appropriate layer offset
+    //
+    // TRAFFIC LIGHTS: These are tricky because they overhang the road!
+    //   - The pole sits on one tile (e.g., corner of intersection)
+    //   - The overhang/light extends over an adjacent road tile
+    //   - Cars need to pass UNDER the overhang, not behind it
+    //
+    //   Solution: Slice the traffic light into TWO parts with different depths:
+    //   1. POLE portion: Use the pole's actual tile position for depth
+    //      - Renders normally based on where it's planted
+    //   2. OVERHANG portion: Use the ROAD tile's position for depth anchor
+    //      - This makes cars on that road tile render BEHIND the overhang
+    //      - The overhang slice depth = road tile's depth + small offset (~0.09)
+    //      - Cars have layer 0.10, so they appear UNDER the light
+    //
+    //   Example: Traffic light at (5,5) with overhang over road at (6,5)
+    //   - Pole slice: depth based on grid (5,5)
+    //   - Overhang slice: depth based on grid (6,5) + 0.09 layer offset
+    //   - Car on (6,5): depth based on grid (6,5) + 0.10 layer offset
+    //   - Result: pole -> overhang -> car (overhang appears above car!)
+    //
+    // ========================================================================
+
+    // Check if this is a decoration with visual extending beyond footprint (like trees)
+    // For these, we use uniform depth for all slices to prevent clipping by adjacent buildings
+    const isExtendedDecoration =
+      building.isDecoration &&
+      building.renderSize &&
+      (building.renderSize.width > footprint.width ||
+        building.renderSize.height > footprint.height);
+
+    // Pre-calculate depth for extended decorations (trees with foliage beyond footprint)
+    // Use footprint position + 1/4 the render extension as a balanced middle ground:
+    // - Not too far back (would get clipped by nearby buildings)
+    // - Not too far forward (would render over buildings in front)
+    const extendX = (renderSize.width - footprint.width) / 4;
+    const extendY = (renderSize.height - footprint.height) / 4;
+    const balancedFrontX = frontX + extendX;
+    const balancedFrontY = frontY + extendY;
+    const balancedGridSum = balancedFrontX + balancedFrontY;
+    const balancedScreenY = GRID_OFFSET_Y + (balancedGridSum * TILE_HEIGHT) / 2;
+    const decorationDepth = this.depthFromSortPoint(
+      screenPos.x,
+      balancedScreenY + TILE_HEIGHT / 2,
+      0.06
+    );
+
+    // ========================================================================
     // VERTICAL SLICE RENDERING FOR CORRECT ISOMETRIC DEPTH SORTING
     // ========================================================================
     //
@@ -1767,18 +2031,24 @@ export class MainScene extends Phaser.Scene {
         slice.setTint(tint);
       }
 
-      // Depth: this slice represents tile column (frontX - i)
-      // Frontmost tile in this column is at (frontX - i, frontY)
-      // gridSum = (frontX - i) + frontY
-      const sliceGridSum = frontX - i + frontY;
-      const sliceScreenY = GRID_OFFSET_Y + (sliceGridSum * TILE_HEIGHT) / 2;
-      slice.setDepth(
-        this.depthFromSortPoint(
-          screenPos.x,
-          sliceScreenY + TILE_HEIGHT / 2,
-          0.05
-        )
-      );
+      // Depth: For extended decorations (like trees), use uniform footprint-based depth
+      // to prevent clipping. For regular buildings, calculate per-slice depth.
+      if (isExtendedDecoration) {
+        slice.setDepth(decorationDepth);
+      } else {
+        // This slice represents tile column (frontX - i)
+        // Frontmost tile in this column is at (frontX - i, frontY)
+        // gridSum = (frontX - i) + frontY
+        const sliceGridSum = frontX - i + frontY;
+        const sliceScreenY = GRID_OFFSET_Y + (sliceGridSum * TILE_HEIGHT) / 2;
+        slice.setDepth(
+          this.depthFromSortPoint(
+            screenPos.x,
+            sliceScreenY + TILE_HEIGHT / 2,
+            0.05
+          )
+        );
+      }
 
       if (sliceIndex === 0) {
         this.buildingSprites.set(key, slice);
@@ -1802,18 +2072,24 @@ export class MainScene extends Phaser.Scene {
         slice.setTint(tint);
       }
 
-      // Depth: this slice represents tile row (frontY - i)
-      // Frontmost tile in this row is at (frontX, frontY - i)
-      // gridSum = frontX + (frontY - i)
-      const sliceGridSum = frontX + frontY - i;
-      const sliceScreenY = GRID_OFFSET_Y + (sliceGridSum * TILE_HEIGHT) / 2;
-      slice.setDepth(
-        this.depthFromSortPoint(
-          screenPos.x,
-          sliceScreenY + TILE_HEIGHT / 2,
-          0.05
-        )
-      );
+      // Depth: For extended decorations (like trees), use uniform footprint-based depth
+      // to prevent clipping. For regular buildings, calculate per-slice depth.
+      if (isExtendedDecoration) {
+        slice.setDepth(decorationDepth);
+      } else {
+        // This slice represents tile row (frontY - i)
+        // Frontmost tile in this row is at (frontX, frontY - i)
+        // gridSum = frontX + (frontY - i)
+        const sliceGridSum = frontX + frontY - i;
+        const sliceScreenY = GRID_OFFSET_Y + (sliceGridSum * TILE_HEIGHT) / 2;
+        slice.setDepth(
+          this.depthFromSortPoint(
+            screenPos.x,
+            sliceScreenY + TILE_HEIGHT / 2,
+            0.05
+          )
+        );
+      }
 
       this.buildingSprites.set(`${key}_s${sliceIndex}`, slice);
       sliceIndex++;
@@ -2270,14 +2546,9 @@ export class MainScene extends Phaser.Scene {
             if (cell) {
               const cellType = cell.type;
               if (isDecoration) {
-                if (cellType === TileType.Building && cell.buildingId) {
-                  const existingBuilding = getBuilding(cell.buildingId);
-                  if (
-                    !existingBuilding ||
-                    existingBuilding.category !== "props"
-                  ) {
-                    footprintCollision = true;
-                  }
+                // Props/decorations collide with any building (including other props)
+                if (cellType === TileType.Building) {
+                  footprintCollision = true;
                 } else if (
                   cellType !== TileType.Grass &&
                   cellType !== TileType.Tile &&

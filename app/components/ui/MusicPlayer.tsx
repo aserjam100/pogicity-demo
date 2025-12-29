@@ -265,7 +265,7 @@ export default function MusicPlayer() {
               fontFamily: "var(--font-pixelify), monospace",
               whiteSpace: "nowrap",
               textShadow: "2px 2px 0 rgba(0, 0, 0, 0.9)",
-              animation: "marquee 20s linear infinite",
+              animation: "marquee 10s linear infinite",
               display: "inline-block",
               paddingLeft: "100%",
               letterSpacing: "1px",

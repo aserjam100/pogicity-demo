@@ -69,6 +69,24 @@ const createEmptyGrid = (): GridCell[][] => {
   );
 };
 
+// Discrete zoom levels matching the button zoom levels
+const ZOOM_LEVELS = [0.25, 0.5, 1, 2, 4];
+const SCROLL_THRESHOLD = 100; // Amount of scroll needed to change zoom level
+
+// Helper function to find closest zoom level index
+const findClosestZoomIndex = (zoomValue: number): number => {
+  let closestIndex = 0;
+  let minDiff = Math.abs(zoomValue - ZOOM_LEVELS[0]);
+  for (let i = 1; i < ZOOM_LEVELS.length; i++) {
+    const diff = Math.abs(zoomValue - ZOOM_LEVELS[i]);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closestIndex = i;
+    }
+  }
+  return closestIndex;
+};
+
 export default function GameBoard() {
   // Grid state (only thing React manages now)
   const [grid, setGrid] = useState<GridCell[][]>(createEmptyGrid);
@@ -141,6 +159,10 @@ export default function GameBoard() {
 
   // Ref to Phaser game for spawning entities
   const phaserGameRef = useRef<PhaserGameHandle>(null);
+
+  // Ref to track accumulated scroll delta for zoom
+  const scrollAccumulatorRef = useRef(0);
+  const scrollDirectionRef = useRef<number | null>(null); // Track scroll direction: positive = down, negative = up
 
   // Reset building orientation to south when switching buildings
   useEffect(() => {
@@ -452,6 +474,10 @@ export default function GameBoard() {
               }
             }
             playBuildSound();
+            // Trigger screen shake effect (like SimCity 4)
+            if (phaserGameRef.current) {
+              phaserGameRef.current.shakeScreen("y", 0.6, 150);
+            }
             break;
           }
           case ToolType.Eraser: {
@@ -501,7 +527,11 @@ export default function GameBoard() {
                   }
                 }
 
-                if (shouldPlaySound) playDestructionSound();
+                if (shouldPlaySound) {
+                  playDestructionSound();
+                  // Horizontal shake on deletion
+                  phaserGameRef.current?.shakeScreen("x", 0.6, 150);
+                }
               } else {
                 const cellBuildingId = cell.buildingId;
                 let sizeW = 1;
@@ -534,12 +564,18 @@ export default function GameBoard() {
                   }
                 }
 
-                if (shouldPlaySound) playDestructionSound();
+                if (shouldPlaySound) {
+                  playDestructionSound();
+                  // Horizontal shake on deletion
+                  phaserGameRef.current?.shakeScreen("x", 0.6, 150);
+                }
               }
             } else if (cellType !== TileType.Grass) {
               newGrid[y][x].type = TileType.Grass;
               newGrid[y][x].isOrigin = true;
               playDestructionSound();
+              // Horizontal shake on deletion
+              phaserGameRef.current?.shakeScreen("x", 0.6, 150);
             }
             break;
           }
@@ -813,6 +849,8 @@ export default function GameBoard() {
         }
 
         playDestructionSound();
+        // Horizontal shake on deletion (eraser drag / bulk delete path)
+        phaserGameRef.current?.shakeScreen("x", 0.6, 150);
         return newGrid;
       });
     },
@@ -1060,41 +1098,35 @@ export default function GameBoard() {
 
   // Zoom controls
   const handleZoomIn = useCallback(() => {
-    setZoom((prev) => Math.min(prev * 2, 4));
+    scrollAccumulatorRef.current = 0; // Reset accumulator when using buttons
+    setZoom((prev) => {
+      const currentIndex = ZOOM_LEVELS.indexOf(prev);
+      if (currentIndex === -1) {
+        // If current zoom doesn't match exactly, find closest and go up
+        const closestIndex = findClosestZoomIndex(prev);
+        return ZOOM_LEVELS[Math.min(closestIndex + 1, ZOOM_LEVELS.length - 1)];
+      }
+      return ZOOM_LEVELS[Math.min(currentIndex + 1, ZOOM_LEVELS.length - 1)];
+    });
   }, []);
 
   const handleZoomOut = useCallback(() => {
-    setZoom((prev) => Math.max(prev / 2, 0.25));
+    scrollAccumulatorRef.current = 0; // Reset accumulator when using buttons
+    setZoom((prev) => {
+      const currentIndex = ZOOM_LEVELS.indexOf(prev);
+      if (currentIndex === -1) {
+        // If current zoom doesn't match exactly, find closest and go down
+        const closestIndex = findClosestZoomIndex(prev);
+        return ZOOM_LEVELS[Math.max(closestIndex - 1, 0)];
+      }
+      return ZOOM_LEVELS[Math.max(currentIndex - 1, 0)];
+    });
   }, []);
 
-  // Scroll wheel zoom with dampening for smooth RCT/SimCity feel
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    // Prevent page scroll
-    e.preventDefault();
-
-    // Dampen the scroll delta - normalize across different devices/browsers
-    // deltaY is positive when scrolling down (zoom out), negative when up (zoom in)
-    const delta = e.deltaY;
-
-    // Use a small zoom factor per scroll tick for smooth feel
-    // 1.08 feels nice - not too jumpy, not too slow
-    const zoomFactor = 1.08;
-
-    // Threshold to ignore tiny accidental scrolls
-    if (Math.abs(delta) < 5) return;
-
-    setZoom((prev) => {
-      let newZoom: number;
-      if (delta > 0) {
-        // Scroll down = zoom out
-        newZoom = prev / zoomFactor;
-      } else {
-        // Scroll up = zoom in
-        newZoom = prev * zoomFactor;
-      }
-      // Clamp to limits
-      return Math.min(Math.max(newZoom, 0.25), 4);
-    });
+  // Zoom is now handled directly in Phaser for correct pointer coordinates
+  // This callback just syncs React state when Phaser emits a zoom change
+  const handleZoomChange = useCallback((newZoom: number) => {
+    setZoom(newZoom);
   }, []);
 
   return (
@@ -1580,7 +1612,6 @@ export default function GameBoard() {
 
       {/* Main game area */}
       <div
-        onWheel={handleWheel}
         style={{
           flex: 1,
           position: "relative",
@@ -1619,6 +1650,7 @@ export default function GameBoard() {
             onTilesDrag={handleTilesDrag}
             onEraserDrag={handleEraserDrag}
             onRoadDrag={handleRoadDrag}
+            onZoomChange={handleZoomChange}
             showPaths={debugPaths}
             showStats={showStats}
           />
