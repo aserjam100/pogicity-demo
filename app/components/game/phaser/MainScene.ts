@@ -15,6 +15,8 @@ import {
   CHARACTER_SPEED,
   CAR_SPEED,
 } from "../types";
+import type { EducationalState } from "../../educational/types";
+import { SECTION_SIZE, SECTIONS_WIDE, SECTIONS_TALL } from "../../educational/types";
 import { GRID_OFFSET_X, GRID_OFFSET_Y } from "./gameConfig";
 import {
   ROAD_SEGMENT_SIZE,
@@ -92,6 +94,10 @@ export class MainScene extends Phaser.Scene {
   private characterSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private previewSprites: Phaser.GameObjects.Image[] = [];
   private lotPreviewSprites: Phaser.GameObjects.Image[] = [];
+  private fogSprites: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+
+  // Educational mode state
+  private educationalState: EducationalState | null = null;
 
   // Game state (owned by Phaser, not React)
   private grid: GridCell[][] = [];
@@ -339,6 +345,9 @@ export class MainScene extends Phaser.Scene {
       this.applyGridUpdates();
       this.gridDirty = false;
     }
+
+    // Render fog of war (educational mode)
+    this.renderFog();
 
     // Update stats display
     this.updateStatsDisplay();
@@ -1666,6 +1675,71 @@ export class MainScene extends Phaser.Scene {
     this.zoomLevel = zoom;
   }
 
+  setEducationalState(state: EducationalState | null): void {
+    this.educationalState = state;
+  }
+
+  centerOnGridPosition(gridX: number, gridY: number): void {
+    if (!this.isReady) return;
+
+    const camera = this.cameras.main;
+    const screenPos = this.gridToScreen(gridX, gridY);
+
+    camera.centerOn(screenPos.x, screenPos.y);
+    camera.scrollX = Math.round(camera.scrollX);
+    camera.scrollY = Math.round(camera.scrollY);
+
+    // Update baseScroll so update() loop doesn't reset it
+    this.baseScrollX = camera.scrollX;
+    this.baseScrollY = camera.scrollY;
+  }
+
+  private renderFog(): void {
+    if (!this.educationalState || this.educationalState.mode !== 'educational') {
+      // Clear fog in sandbox mode
+      this.fogSprites.forEach(sprite => sprite.destroy());
+      this.fogSprites.clear();
+      return;
+    }
+
+    for (let sy = 0; sy < SECTIONS_TALL; sy++) {
+      for (let sx = 0; sx < SECTIONS_WIDE; sx++) {
+        const sectionKey = `${sx},${sy}`;
+        const isRevealed = this.educationalState.sectionsRevealed.has(sectionKey);
+
+        if (isRevealed) {
+          // Remove fog
+          const fog = this.fogSprites.get(sectionKey);
+          if (fog) {
+            fog.destroy();
+            this.fogSprites.delete(sectionKey);
+          }
+        } else {
+          // Add fog if not exists
+          if (!this.fogSprites.has(sectionKey)) {
+            const centerX = sx * SECTION_SIZE + SECTION_SIZE / 2;
+            const centerY = sy * SECTION_SIZE + SECTION_SIZE / 2;
+            const screenPos = this.gridToScreen(centerX, centerY);
+
+            const fogRect = this.add.rectangle(
+              screenPos.x,
+              screenPos.y,
+              TILE_WIDTH * SECTION_SIZE * 1.2, // Overlap slightly
+              TILE_HEIGHT * SECTION_SIZE * 1.2,
+              0x000000,
+              0.85 // 85% opacity
+            );
+
+            fogRect.setDepth(
+              this.depthFromSortPoint(centerX, centerY, 0.03) // Between ground and buildings
+            );
+            this.fogSprites.set(sectionKey, fogRect);
+          }
+        }
+      }
+    }
+  }
+
   // Zoom towards a specific screen point (legacy method, now using handleWheel)
   zoomAtPoint(zoom: number, screenX: number, screenY: number): void {
     if (!this.isReady) {
@@ -2806,5 +2880,19 @@ export class MainScene extends Phaser.Scene {
         }
       }
     }
+  }
+
+  takeScreenshot(): void {
+    if (!this.game) return;
+
+    // Use Phaser's built-in screenshot functionality
+    this.game.renderer.snapshot((image: HTMLImageElement) => {
+      // Create a download link
+      const link = document.createElement('a');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      link.download = `math-city-${timestamp}.png`;
+      link.href = image.src;
+      link.click();
+    });
   }
 }

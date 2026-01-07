@@ -32,6 +32,8 @@ export interface GridCell {
   buildingOrientation?: Direction;
   // For props, store the underlying tile type (so props don't render their own floor)
   underlyingTileType?: TileType;
+  // For educational mode: fog-of-war visibility tracking
+  isRevealed?: boolean;
 }
 
 export enum Direction {

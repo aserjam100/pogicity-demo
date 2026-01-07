@@ -56,6 +56,19 @@ import MusicPlayer from "../ui/MusicPlayer";
 import LoadWindow from "../ui/LoadWindow";
 import Modal from "../ui/Modal";
 import PromptModal from "../ui/PromptModal";
+import QuestionModal from "../educational/QuestionModal";
+import CelebrationModal from "../educational/CelebrationModal";
+import ControlsPanel from "../educational/ControlsPanel";
+import {
+  EducationalState,
+  SECTION_SIZE,
+} from "../educational/types";
+import { EDUCATIONAL_CITIES } from "../educational/cities";
+import {
+  generateQuestionSequence,
+  getNextSectionToReveal,
+  EDUCATIONAL_BUILDINGS,
+} from "../educational/questions";
 
 // Initialize empty grid
 const createEmptyGrid = (): GridCell[][] => {
@@ -87,7 +100,11 @@ const findClosestZoomIndex = (zoomValue: number): number => {
   return closestIndex;
 };
 
-export default function GameBoard() {
+interface GameBoardProps {
+  initialMode: 'educational' | 'sandbox';
+}
+
+export default function GameBoard({ initialMode }: GameBoardProps) {
   // Grid state (only thing React manages now)
   const [grid, setGrid] = useState<GridCell[][]>(createEmptyGrid);
 
@@ -137,6 +154,11 @@ export default function GameBoard() {
     saturation: 1.0,
     brightness: 1.0,
   });
+
+  // Educational mode state
+  const [educationalState, setEducationalState] = useState<EducationalState | null>(null);
+  const [showCelebration, setShowCelebration] = useState(false);
+  const [celebrationMessage, setCelebrationMessage] = useState('');
 
   // Mobile warning state
   const [isMobile, setIsMobile] = useState(false);
@@ -212,7 +234,7 @@ export default function GameBoard() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedTool, selectedBuildingId]);
+  }, [selectedTool, selectedBuildingId, educationalState]);
 
   // Handle ESC key to deselect tool
   useEffect(() => {
@@ -251,9 +273,111 @@ export default function GameBoard() {
     }
   }, [isPlayerDriving]);
 
+  // Initialize educational mode
+  useEffect(() => {
+    if (initialMode === 'educational') {
+      const city = EDUCATIONAL_CITIES[0];
+      const questions = generateQuestionSequence();
+
+      // Load city grid
+      setGrid(city.grid);
+
+      const startKey = `${city.startSection.x},${city.startSection.y}`;
+
+      setEducationalState({
+        mode: 'educational',
+        currentQuestion: questions[0],
+        sectionsRevealed: new Set([startKey]),
+        buildingInventory: [
+          { buildingId: questions[0].buildingId, available: questions[0].targetCount },
+        ],
+        questionsCompleted: 0,
+        currentCityId: city.id,
+        startingSectionX: city.startSection.x,
+        startingSectionY: city.startSection.y,
+      });
+
+      // Auto-select building tool with first question's building
+      setSelectedTool(ToolType.Building);
+      setSelectedBuildingId(questions[0].buildingId);
+
+      // Mark starting section as revealed
+      setGrid(prevGrid => {
+        const newGrid = prevGrid.map(row => row.map(cell => ({ ...cell })));
+        for (let dy = 0; dy < SECTION_SIZE; dy++) {
+          for (let dx = 0; dx < SECTION_SIZE; dx++) {
+            const cellX = city.startSection.x * SECTION_SIZE + dx;
+            const cellY = city.startSection.y * SECTION_SIZE + dy;
+            if (cellX < GRID_WIDTH && cellY < GRID_HEIGHT) {
+              newGrid[cellY][cellX].isRevealed = true;
+            }
+          }
+        }
+        return newGrid;
+      });
+
+      // Center camera on starting section after a brief delay (for Phaser to be ready)
+      setTimeout(() => {
+        if (phaserGameRef.current) {
+          const centerX = city.startSection.x * SECTION_SIZE + SECTION_SIZE / 2;
+          const centerY = city.startSection.y * SECTION_SIZE + SECTION_SIZE / 2;
+          phaserGameRef.current.centerOnGridPosition(centerX, centerY);
+        }
+      }, 100);
+    }
+  }, [initialMode]);
+
+  // Sync educational state to Phaser
+  useEffect(() => {
+    if (phaserGameRef.current) {
+      phaserGameRef.current.setEducationalState(educationalState);
+    }
+  }, [educationalState]);
+
+  // Auto-detect if stuck in completed state and transition to sandbox
+  useEffect(() => {
+    if (educationalState?.mode === 'educational' &&
+        educationalState.currentQuestion &&
+        educationalState.currentQuestion.count >= educationalState.currentQuestion.targetCount) {
+      // Question is complete, check if all questions are done
+      const allQuestions = generateQuestionSequence();
+      if (educationalState.questionsCompleted + 1 >= allQuestions.length) {
+        // All questions complete, transition to sandbox mode
+        console.log('Auto-transitioning to sandbox mode (all questions complete)');
+        setEducationalState({
+          ...educationalState,
+          mode: 'sandbox',
+          currentQuestion: null,
+        });
+
+        setModalState({
+          isVisible: true,
+          title: '🎉 Missions Complete!',
+          message: 'Great job! Now add more buildings from the build menu, and spawn citizens and cars!',
+          onConfirm: null,
+        });
+      }
+    }
+  }, [educationalState]);
+
   // Handle tile click (grid modifications)
   const handleTileClick = useCallback(
     (x: number, y: number) => {
+      // EDUCATIONAL MODE RESTRICTIONS
+      if (educationalState?.mode === 'educational') {
+        // Only allow building placement
+        if (selectedTool !== ToolType.Building) return;
+
+        // Only allow placing current question's building
+        if (selectedBuildingId !== educationalState.currentQuestion?.buildingId) return;
+
+        // Check inventory
+        const inventoryItem = educationalState.buildingInventory.find(
+          item => item.buildingId === selectedBuildingId
+        );
+        if (!inventoryItem || inventoryItem.available <= 0) return;
+      }
+
       setGrid((prevGrid) => {
         const newGrid = prevGrid.map((row) => row.map((cell) => ({ ...cell })));
 
@@ -582,8 +706,36 @@ export default function GameBoard() {
 
         return newGrid;
       });
+
+      // EDUCATIONAL MODE: Update question progress
+      if (educationalState?.mode === 'educational' && selectedTool === ToolType.Building) {
+        const question = educationalState.currentQuestion!;
+        const newCount = question.count + 1;
+        const isComplete = newCount >= question.targetCount;
+
+        setEducationalState(prev => ({
+          ...prev!,
+          currentQuestion: {
+            ...question,
+            count: newCount,
+          },
+          buildingInventory: prev!.buildingInventory.map(item =>
+            item.buildingId === selectedBuildingId
+              ? { ...item, available: item.available - 1 }
+              : item
+          ),
+        }));
+
+        if (isComplete) {
+          setCelebrationMessage(
+            `You placed ${question.targetCount} ${question.buildingName}${question.targetCount > 1 ? 's' : ''}!`
+          );
+          // Use setTimeout to ensure state updates complete first
+          setTimeout(() => setShowCelebration(true), 100);
+        }
+      }
     },
-    [selectedTool, selectedBuildingId, buildingOrientation]
+    [selectedTool, selectedBuildingId, buildingOrientation, educationalState]
   );
 
   // Handle batch tile placement from drag operations (snow/tile tools)
@@ -957,6 +1109,77 @@ export default function GameBoard() {
     timestamp: number;
   }
 
+  const handleCelebrationContinue = useCallback(() => {
+    if (!educationalState) return;
+
+    setShowCelebration(false);
+
+    // Check if all questions are complete first
+    const allQuestions = generateQuestionSequence();
+    const nextQuestionIndex = educationalState.questionsCompleted + 1;
+
+    if (nextQuestionIndex >= allQuestions.length) {
+      // All questions completed! Transition to free build mode
+      setEducationalState({
+        ...educationalState,
+        mode: 'sandbox',
+        currentQuestion: null,
+      });
+
+      setModalState({
+        isVisible: true,
+        title: '🎉 Missions Complete!',
+        message: 'Great job! Now add more buildings from the build menu, and spawn citizens and cars!',
+        onConfirm: null,
+      });
+      return;
+    }
+
+    // Get next section to reveal
+    const nextSection = getNextSectionToReveal(
+      educationalState.sectionsRevealed,
+      educationalState.startingSectionX,
+      educationalState.startingSectionY
+    );
+
+    if (nextSection) {
+      const newRevealed = new Set(educationalState.sectionsRevealed);
+      newRevealed.add(`${nextSection.x},${nextSection.y}`);
+
+      // Reveal section in grid
+      setGrid(prevGrid => {
+        const newGrid = prevGrid.map(row => row.map(cell => ({ ...cell })));
+        for (let dy = 0; dy < SECTION_SIZE; dy++) {
+          for (let dx = 0; dx < SECTION_SIZE; dx++) {
+            const cellX = nextSection.x * SECTION_SIZE + dx;
+            const cellY = nextSection.y * SECTION_SIZE + dy;
+            if (cellX < GRID_WIDTH && cellY < GRID_HEIGHT) {
+              newGrid[cellY][cellX].isRevealed = true;
+            }
+          }
+        }
+        return newGrid;
+      });
+
+      // Load next question
+      const nextQuestion = allQuestions[nextQuestionIndex];
+
+      setEducationalState({
+        ...educationalState,
+        sectionsRevealed: newRevealed,
+        questionsCompleted: nextQuestionIndex,
+        currentQuestion: nextQuestion,
+        buildingInventory: [
+          { buildingId: nextQuestion.buildingId, available: nextQuestion.targetCount },
+        ],
+      });
+
+      // Auto-select next building
+      setSelectedTool(ToolType.Building);
+      setSelectedBuildingId(nextQuestion.buildingId);
+    }
+  }, [educationalState]);
+
   const handleSaveGame = useCallback(() => {
     const characterCount = phaserGameRef.current?.getCharacterCount() ?? 0;
     const carCount = phaserGameRef.current?.getCarCount() ?? 0;
@@ -1140,18 +1363,21 @@ export default function GameBoard() {
         background: "#4a5d6a",
       }}
     >
-      {/* Top Left - Save/Load and Zoom buttons */}
-      <div
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 2, // Slight margin so border doesn't touch edge
-          zIndex: 1000,
-          display: "flex",
-          gap: 0,
-        }}
-        onWheel={(e) => e.stopPropagation()}
-      >
+      {/* Hide sandbox UI in educational mode */}
+      {educationalState?.mode !== 'educational' && (
+        <>
+          {/* Top Left - Save/Load and Zoom buttons */}
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 2, // Slight margin so border doesn't touch edge
+              zIndex: 1000,
+              display: "flex",
+              gap: 0,
+            }}
+            onWheel={(e) => e.stopPropagation()}
+          >
         {/* Save button */}
         <button
           onClick={() => {
@@ -1366,20 +1592,68 @@ export default function GameBoard() {
             }}
           />
         </button>
+        {/* Screenshot button */}
+        <button
+          onClick={() => {
+            if (phaserGameRef.current) {
+              phaserGameRef.current.takeScreenshot();
+              playDoubleClickSound();
+            }
+          }}
+          title="Take Screenshot"
+          className="rct-blue-button-interactive"
+          style={{
+            background: "#6CA6E8",
+            border: "2px solid",
+            borderColor: "#A3CDF9 #366BA8 #366BA8 #A3CDF9",
+            padding: 0,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: 0,
+            borderTop: "none",
+            boxShadow: "1px 1px 0px #244B7A",
+            imageRendering: "pixelated",
+            transition: "filter 0.1s",
+            width: 48,
+            height: 48,
+          }}
+          onMouseEnter={(e) =>
+            (e.currentTarget.style.filter = "brightness(1.1)")
+          }
+          onMouseLeave={(e) => (e.currentTarget.style.filter = "none")}
+          onMouseDown={(e) => {
+            e.currentTarget.style.filter = "brightness(0.9)";
+            e.currentTarget.style.borderColor =
+              "#366BA8 #A3CDF9 #A3CDF9 #366BA8";
+            e.currentTarget.style.transform = "translate(1px, 1px)";
+            e.currentTarget.style.boxShadow = "inset 1px 1px 0px #244B7A";
+          }}
+          onMouseUp={(e) => {
+            e.currentTarget.style.filter = "brightness(1.1)";
+            e.currentTarget.style.borderColor =
+              "#A3CDF9 #366BA8 #366BA8 #A3CDF9";
+            e.currentTarget.style.transform = "none";
+            e.currentTarget.style.boxShadow = "1px 1px 0px #244B7A";
+          }}
+        >
+          <span style={{ fontSize: 24 }}>📷</span>
+        </button>
       </div>
 
-      {/* Top Right - Build and Eraser buttons */}
-      <div
-        style={{
-          position: "absolute",
-          top: 0,
-          right: 2,
-          zIndex: 1000,
-          display: "flex",
-          gap: 0,
-        }}
-        onWheel={(e) => e.stopPropagation()}
-      >
+          {/* Top Right - Build and Eraser buttons */}
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              right: 2,
+              zIndex: 1000,
+              display: "flex",
+              gap: 0,
+            }}
+            onWheel={(e) => e.stopPropagation()}
+          >
         <button
           onClick={() => {
             const willOpen = !isToolWindowVisible;
@@ -1406,9 +1680,9 @@ export default function GameBoard() {
           style={{
             background: isToolWindowVisible ? "#4a1a1a" : "#6b2a2a",
             border: "2px solid",
-            borderColor: isToolWindowVisible
-              ? "#4a1a1a #ab6a6a #ab6a6a #4a1a1a" // Inverted for active
-              : "#ab6a6a #4a1a1a #4a1a1a #ab6a6a", // Normal
+            borderRightColor: isToolWindowVisible ? "#ab6a6a" : "#4a1a1a",
+            borderBottomColor: isToolWindowVisible ? "#ab6a6a" : "#4a1a1a",
+            borderLeftColor: isToolWindowVisible ? "#4a1a1a" : "#ab6a6a",
             padding: 0,
             cursor: "pointer",
             display: "flex",
@@ -1433,16 +1707,18 @@ export default function GameBoard() {
           onMouseDown={(e) => {
             if (isToolWindowVisible) return;
             e.currentTarget.style.filter = "brightness(0.9)";
-            e.currentTarget.style.borderColor =
-              "#4a1a1a #ab6a6a #ab6a6a #4a1a1a";
+            e.currentTarget.style.borderRightColor = "#ab6a6a";
+            e.currentTarget.style.borderBottomColor = "#ab6a6a";
+            e.currentTarget.style.borderLeftColor = "#4a1a1a";
             e.currentTarget.style.transform = "translate(1px, 1px)";
             e.currentTarget.style.boxShadow = "inset 1px 1px 0px #2a0a0a";
           }}
           onMouseUp={(e) => {
             if (isToolWindowVisible) return;
             e.currentTarget.style.filter = "brightness(1.1)";
-            e.currentTarget.style.borderColor =
-              "#ab6a6a #4a1a1a #4a1a1a #ab6a6a";
+            e.currentTarget.style.borderRightColor = "#4a1a1a";
+            e.currentTarget.style.borderBottomColor = "#4a1a1a";
+            e.currentTarget.style.borderLeftColor = "#ab6a6a";
             e.currentTarget.style.transform = "none";
             e.currentTarget.style.boxShadow = "1px 1px 0px #2a0a0a";
           }}
@@ -1478,10 +1754,12 @@ export default function GameBoard() {
             background:
               selectedTool === ToolType.Eraser ? "#4a1a1a" : "#6b2a2a",
             border: "2px solid",
-            borderColor:
-              selectedTool === ToolType.Eraser
-                ? "#4a1a1a #ab6a6a #ab6a6a #4a1a1a"
-                : "#ab6a6a #4a1a1a #4a1a1a #ab6a6a",
+            borderRightColor:
+              selectedTool === ToolType.Eraser ? "#ab6a6a" : "#4a1a1a",
+            borderBottomColor:
+              selectedTool === ToolType.Eraser ? "#ab6a6a" : "#4a1a1a",
+            borderLeftColor:
+              selectedTool === ToolType.Eraser ? "#4a1a1a" : "#ab6a6a",
             padding: 0,
             cursor: "pointer",
             display: "flex",
@@ -1509,16 +1787,18 @@ export default function GameBoard() {
           onMouseDown={(e) => {
             if (selectedTool === ToolType.Eraser) return;
             e.currentTarget.style.filter = "brightness(0.9)";
-            e.currentTarget.style.borderColor =
-              "#4a1a1a #ab6a6a #ab6a6a #4a1a1a";
+            e.currentTarget.style.borderRightColor = "#ab6a6a";
+            e.currentTarget.style.borderBottomColor = "#ab6a6a";
+            e.currentTarget.style.borderLeftColor = "#4a1a1a";
             e.currentTarget.style.transform = "translate(1px, 1px)";
             e.currentTarget.style.boxShadow = "inset 1px 1px 0px #2a0a0a";
           }}
           onMouseUp={(e) => {
             if (selectedTool === ToolType.Eraser) return;
             e.currentTarget.style.filter = "brightness(1.1)";
-            e.currentTarget.style.borderColor =
-              "#ab6a6a #4a1a1a #4a1a1a #ab6a6a";
+            e.currentTarget.style.borderRightColor = "#4a1a1a";
+            e.currentTarget.style.borderBottomColor = "#4a1a1a";
+            e.currentTarget.style.borderLeftColor = "#ab6a6a";
             e.currentTarget.style.transform = "none";
             e.currentTarget.style.boxShadow = "1px 1px 0px #2a0a0a";
           }}
@@ -1534,6 +1814,8 @@ export default function GameBoard() {
           />
         </button>
       </div>
+        </>
+      )}
 
       {/* Bottom right - Music player */}
       <div
@@ -1594,8 +1876,9 @@ export default function GameBoard() {
           />
         </div>
 
-        {/* Floating tool window */}
-        <ToolWindow
+        {/* Floating tool window (sandbox only) */}
+        {educationalState?.mode !== 'educational' && (
+          <ToolWindow
           selectedTool={selectedTool}
           selectedBuildingId={selectedBuildingId}
           onToolSelect={setSelectedTool}
@@ -1636,13 +1919,16 @@ export default function GameBoard() {
             }
           }}
         />
+        )}
 
-        {/* Load window */}
-        <LoadWindow
-          isVisible={isLoadWindowVisible}
-          onClose={() => setIsLoadWindowVisible(false)}
-          onLoad={handleLoadGame}
-        />
+        {/* Load window (sandbox only) */}
+        {educationalState?.mode !== 'educational' && (
+          <LoadWindow
+            isVisible={isLoadWindowVisible}
+            onClose={() => setIsLoadWindowVisible(false)}
+            onLoad={handleLoadGame}
+          />
+        )}
 
         {/* Modal */}
         <Modal
@@ -1669,6 +1955,24 @@ export default function GameBoard() {
             }
             setPromptState({ ...promptState, isVisible: false });
           }}
+        />
+
+        {/* Educational Mode UI */}
+        {educationalState?.mode === 'educational' && educationalState.currentQuestion && (
+          <QuestionModal
+            question={educationalState.currentQuestion}
+            onHint={() => {
+              // TODO: Implement hint (highlight valid placement areas)
+            }}
+          />
+        )}
+
+        {educationalState?.mode === 'educational' && <ControlsPanel />}
+
+        <CelebrationModal
+          isVisible={showCelebration}
+          message={celebrationMessage}
+          onContinue={handleCelebrationContinue}
         />
 
         {/* Mobile Warning Banner */}

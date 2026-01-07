@@ -11,6 +11,7 @@ import Phaser from "phaser";
 import { MainScene, SceneEvents } from "./MainScene";
 import { createGameConfig } from "./gameConfig";
 import { GridCell, ToolType, Direction, Car } from "../types";
+import type { EducationalState } from "../../educational/types";
 
 // Exposed methods for parent component
 export interface PhaserGameHandle {
@@ -25,6 +26,9 @@ export interface PhaserGameHandle {
   clearCars: () => void;
   shakeScreen: (axis?: "x" | "y", intensity?: number, duration?: number) => void;
   zoomAtPoint: (zoom: number, screenX: number, screenY: number) => void;
+  setEducationalState: (state: EducationalState | null) => void;
+  centerOnGridPosition: (gridX: number, gridY: number) => void;
+  takeScreenshot: () => void;
 }
 
 interface PhaserGameProps {
@@ -132,6 +136,21 @@ const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
           if (sceneRef.current) {
             zoomFromAtPoint.current = zoom; // Track this zoom value to skip re-centering
             sceneRef.current.zoomAtPoint(zoom, screenX, screenY);
+          }
+        },
+        setEducationalState: (state: EducationalState | null) => {
+          if (sceneRef.current) {
+            sceneRef.current.setEducationalState(state);
+          }
+        },
+        centerOnGridPosition: (gridX: number, gridY: number) => {
+          if (sceneRef.current) {
+            sceneRef.current.centerOnGridPosition(gridX, gridY);
+          }
+        },
+        takeScreenshot: () => {
+          if (sceneRef.current) {
+            sceneRef.current.takeScreenshot();
           }
         },
       }),
