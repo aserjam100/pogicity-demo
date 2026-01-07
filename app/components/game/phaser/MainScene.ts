@@ -2886,13 +2886,16 @@ export class MainScene extends Phaser.Scene {
     if (!this.game) return;
 
     // Use Phaser's built-in screenshot functionality
-    this.game.renderer.snapshot((image: HTMLImageElement) => {
-      // Create a download link
-      const link = document.createElement('a');
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      link.download = `math-city-${timestamp}.png`;
-      link.href = image.src;
-      link.click();
+    this.game.renderer.snapshot((snapshot: HTMLImageElement | Phaser.Display.Color) => {
+      // Type guard to check if snapshot is an HTMLImageElement
+      if (snapshot instanceof HTMLImageElement) {
+        // Create a download link
+        const link = document.createElement('a');
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+        link.download = `math-city-${timestamp}.png`;
+        link.href = snapshot.src;
+        link.click();
+      }
     });
   }
 }
